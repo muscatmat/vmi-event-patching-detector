@@ -8,13 +8,10 @@
 struct event_data 
 {
     // Event type
-    unsigned long type;
+    pid_t pid;
 
-    // Physical address of event to monitor
-    unsigned long physical_addr;
-
-    // Size of monitoring page
-    int monitor_size;
+    // Patched page address
+    addr_t page_addr;
 };
 
 ///////////////////// 
@@ -22,13 +19,12 @@ struct event_data
 /////////////////////
 
 void register_patched_memory_page(vmi_instance_t vmi, vmi_pid_t pid, addr_t page_addr);
-//bool register_patched_process_event(vmi_instance_t vmi, char *req_process);
+event_response_t mem_write_cb(vmi_instance_t vmi, vmi_event_t *event);
+event_response_t page_change_callback(vmi_instance_t vmi, vmi_event_t *event);
 
 void cleanup(vmi_instance_t vmi);
-
-event_response_t mem_write_cb(vmi_instance_t vmi, vmi_event_t *event);
-
 void free_event_data(vmi_event_t *event, status_t rc);
+
 void print_event(vmi_event_t *event);
 
 void *security_checking_thread(void *arg);

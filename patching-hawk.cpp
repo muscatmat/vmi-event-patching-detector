@@ -193,15 +193,6 @@ int main(int argc, char **argv)
 
     register_patched_memory_page(vmi, pid, page_addr);
 
-    // if (register_patched_memory_page(vmi, pid, argv[4]) == FALSE)
-    // {
-    //     printf("Process not found!\n");
-
-    //     cleanup(vmi);
-    //     printf("Naive Event Hawk-Eye Program Ended!\n");
-    //     return 4;
-    // }
-
     printf("Waiting for events...\n");
     while (!interrupted)
     {
@@ -229,60 +220,23 @@ event_response_t mem_write_cb(vmi_instance_t vmi, vmi_event_t *event)
         t = clock();
     #endif
 
-    #ifdef ALWAYS_SEND_EVENT
-        print_event(event);
-
-        // Read integer from written event address
-        addr_t event_addr = (event->mem_event.gfn << 12) + event->mem_event.offset;
-        uint32_t event_type;
-        vmi_read_32_pa(vmi, event_addr, &event_type);
-
-        printf("Event Type is %d\n", event_type);
-
-        monitored_events_count++;
-        vmi_clear_event(vmi, event, NULL);
-
-        #ifdef MONITORING_MODE
-            struct event_data *any_data = (struct event_data *) event->data;
-            event_deque.push_back(any_data->type);
-        #endif
-
-        vmi_step_event(vmi, event, event->vcpu_id, 1, NULL);
-
-        #ifdef MEASURE_EVENT_CALLBACK_TIME
-            t = clock() - t;
-            printf("mem_write_cb() took %f seconds to execute \n", ((double)t)/CLOCKS_PER_SEC);
-        #endif
-
-        return VMI_EVENT_RESPONSE_NONE;
-
-    #else
-
-    // Always clear event on callback
-    vmi_clear_event(vmi, event, NULL);
+    print_event(event);
 
     monitored_events_count++;
+    vmi_clear_event(vmi, event, NULL);
 
-    struct event_data *data = (struct event_data *) event->data;
-    
-    // Check that adddress hit is within monitoring range    
+    // Validate written data is from patched page
     addr_t event_addr = (event->mem_event.gfn << 12) + event->mem_event.offset;
-    addr_t min_addr = data->physical_addr;
-    addr_t max_addr = data->physical_addr + data->monitor_size;
+    uint32_t event_page_data;
+    vmi_read_32_pa(vmi, event_addr, &event_page_data);
 
-    if (event_addr < min_addr || event_addr > max_addr)
-    {
-        irrelevant_events_count++;
-
-        vmi_step_event(vmi, event, event->vcpu_id, 1, NULL);
+    if (event->mem_event.offset != 0 || event_page_data != 0){
+        printf("Offset \%" PRIx64" is invalid or data %d is not zero!\n",event->mem_event.offset, event_page_data);
+        // MM - TODO: Check for process existince and return
         return VMI_EVENT_RESPONSE_NONE;
     }
 
-    #ifdef MONITORING_MODE
-        event_deque.push_back(data->type);
-    #endif
-
-    vmi_step_event(vmi, event, event->vcpu_id, 1, NULL);
+    vmi_step_event(vmi, event, event->vcpu_id, 1, page_change_callback);
 
     #ifdef MEASURE_EVENT_CALLBACK_TIME
         t = clock() - t;
@@ -290,13 +244,43 @@ event_response_t mem_write_cb(vmi_instance_t vmi, vmi_event_t *event)
     #endif
 
     return VMI_EVENT_RESPONSE_NONE;
-    #endif
 } 
+
+event_response_t page_change_callback(vmi_instance_t vmi, vmi_event_t *event)
+{
+    // Read event page information
+    addr_t event_addr = (event->mem_event.gfn << 12) + event->mem_event.offset;
+    uint32_t event_type;
+    vmi_read_32_pa(vmi, event_addr, &event_type);
+
+    printf("Event Type is %d\n", event_type);
+
+    #ifdef MONITORING_MODE
+        // MM - TODO: Check event_type is within accepted range and whether to register event SIGNATURE??
+        event_deque.push_back(event_type);
+    #endif
+
+    // MM - Rewrite zero again for page data validation
+    uint32_t zero_data = 0;
+    vmi_write_32_pa(vmi, event_addr, &zero_data);
+
+    if (vmi_register_event(vmi, event) == VMI_FAILURE)
+    {
+        printf("Failed to register event in callback.\n");
+
+        interrupted = -1;
+        
+        return VMI_EVENT_RESPONSE_NONE;
+    }
+
+    return VMI_EVENT_RESPONSE_NONE;
+}
+
 
 void free_event_data(vmi_event_t *event, status_t rc)
 {
     struct event_data * data = (struct event_data *) event->data;
-    printf("Freeing data for physical address: \%" PRIx64" from page: \%" PRIx64" due to status %d \n", data->physical_addr, data->physical_addr << 12, rc);
+    printf("Freeing data for patched page: \%" PRIx64" due to status %d \n", data->page_addr, rc);
     free(data); 
 }
 
@@ -309,6 +293,13 @@ void register_patched_memory_page(vmi_instance_t vmi, vmi_pid_t pid, addr_t page
     // Register write memory event (>> 12 to point to page base)
     vmi_event_t *patch_event = (vmi_event_t *) malloc(sizeof(vmi_event_t));
     SETUP_MEM_EVENT(patch_event, struct_addr >> 12, VMI_MEMACCESS_W, mem_write_cb, 0);
+
+    struct event_data *event_data = (struct event_data *) malloc(sizeof(struct event_data));
+    event_data->pid = pid;
+    event_data->page_addr = page_addr;
+
+    patch_event->data = event_data;
+
     if (vmi_register_event(vmi, patch_event) == VMI_FAILURE)
     {
         printf("Failed to register event.\n");
@@ -319,90 +310,6 @@ void register_patched_memory_page(vmi_instance_t vmi, vmi_pid_t pid, addr_t page
     }
     printf("Patching Event Successfuly Registered!\n");
 }
-
-/*bool register_patched_process_event(vmi_instance_t vmi, char *req_process) 
-{
-    printf("Searching for process: %s\n", req_process);
-    
-    unsigned long tasks_offset = vmi_get_offset(vmi, "linux_tasks");
-    unsigned long name_offset = vmi_get_offset(vmi, "linux_name");
-    unsigned long pid_offset = vmi_get_offset(vmi, "linux_pid");
-
-    addr_t list_head = vmi_translate_ksym2v(vmi, "init_task") + tasks_offset;
-
-    addr_t next_list_entry = list_head;
-
-    // Perform task list walk-through
-    addr_t current_process = 0;
-    char *procname = NULL;
-    vmi_pid_t pid = 0;
-    status_t status;
-
-    do 
-    {
-        current_process = next_list_entry - tasks_offset;
-
-        vmi_read_32_va(vmi, current_process + pid_offset, 0, (uint32_t*)&pid);
-
-        procname = vmi_read_str_va(vmi, current_process + name_offset, 0);
-        if (!procname) 
-        {
-            printf("Failed to find procname\n");
-            return FALSE;
-        }
-
-        if (procname && strcmp(procname, req_process) == 0){
-            printf("Found Process with PID: %d and struct addr: \%" PRIx64"\n", pid, current_process);
-            free(procname);
-
-            
-            // Retrieve process space
-
-
-
-            addr_t struct_addr = vmi_translate_kv2p(vmi, current_process);
-
-            // Retrieve signature from memory
-
-
-            
-            printf("Registering event for physical addr: %" PRIx64"\n", struct_addr);
-            // Register write memory event (>> 12 to point to page base)
-            vmi_event_t *proc_event = (vmi_event_t *) malloc(sizeof(vmi_event_t));
-            SETUP_MEM_EVENT(proc_event, struct_addr >> 12, VMI_MEMACCESS_W, mem_write_cb, 0);
-
-            // Setup event context data
-            //vmi_read_64_pa(vmi, struct_addr + tasks_offset, &(event_data->next_process));
-            //printf("Initial Next Process (struct addr: \%" PRIx64")\n", event_data->next_process - tasks_offset);
-
-            if (vmi_register_event(vmi, proc_event) == VMI_FAILURE)
-            {
-                printf("Failed to register event.\n");
-
-                cleanup(vmi);
-                printf("Patching Event Hawk-Eye Program Ended!\n");
-                return FALSE;
-            }
-
-            return TRUE;
-        }
-        
-        if (procname) 
-        {
-            free(procname);
-            procname = NULL;
-        }
-
-        status = vmi_read_addr_va(vmi, next_list_entry, 0, &next_list_entry);
-        if (status == VMI_FAILURE) 
-        {
-            printf("Failed to read next pointer in loop at %" PRIx64"\n", next_list_entry);
-            return FALSE;
-        }
-    } while(next_list_entry != list_head);
-
-    return FALSE;
-}*/
 
 void cleanup(vmi_instance_t vmi)
 {
