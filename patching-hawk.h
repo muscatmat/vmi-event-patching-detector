@@ -18,7 +18,8 @@ struct event_data
 // Functions
 /////////////////////
 
-void register_patched_memory_page(vmi_instance_t vmi, vmi_pid_t pid, addr_t page_addr);
+bool find_process_patch_page(vmi_instance_t vmi, string dwarf_fp, vmi_pid_t required_pid);
+void register_patched_memory_page(vmi_instance_t vmi, string dwarf_fp, vmi_pid_t pid, addr_t page_addr);
 event_response_t mem_write_cb(vmi_instance_t vmi, vmi_event_t *event);
 event_response_t page_change_callback(vmi_instance_t vmi, vmi_event_t *event);
 

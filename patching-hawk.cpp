@@ -40,8 +40,11 @@ using namespace std;
 
 // Event Names Contants
 #define INTERRUPTED_EVENT 64
-#define EXIT_EVENT 1
 #define PUTS_EVENT 2
+#define OPEN_EVENT 3
+#define CLOSE_EVENT 4
+#define FORK_EVENT 5
+#define EXEC_EVENT 6
 
 /////////////////////
 // Global Variables
@@ -49,6 +52,7 @@ using namespace std;
 Deque<int> event_deque;
 struct vmi_event_node *vmi_event_head;
 string dwarf_fp;
+bool didFirstChange = false;
 
 // Result Measurements
 //#define MONITORING_MODE
@@ -191,7 +195,7 @@ int main(int argc, char **argv)
     addr_t page_addr;
     sscanf(argv[4], "%" PRIx64"", &page_addr);
 
-    register_patched_memory_page(vmi, pid, page_addr);
+    register_patched_memory_page(vmi, dwarf_fp, pid, page_addr);
 
     printf("Waiting for events...\n");
     while (!interrupted)
@@ -230,11 +234,13 @@ event_response_t mem_write_cb(vmi_instance_t vmi, vmi_event_t *event)
     uint32_t event_page_data;
     vmi_read_32_pa(vmi, event_addr, &event_page_data);
 
-    if (event->mem_event.offset != 0 || event_page_data != 0){
+    if (event->mem_event.offset != 0 || (event_page_data != 0 && didFirstChange)){
         printf("Offset \%" PRIx64" is invalid or data %d is not zero!\n",event->mem_event.offset, event_page_data);
         // MM - TODO: Check for process existince and return
         return VMI_EVENT_RESPONSE_NONE;
     }
+
+    didFirstChange = true;
 
     vmi_step_event(vmi, event, event->vcpu_id, 1, page_change_callback);
 
@@ -284,8 +290,138 @@ void free_event_data(vmi_event_t *event, status_t rc)
     free(data); 
 }
 
-void register_patched_memory_page(vmi_instance_t vmi, vmi_pid_t pid, addr_t page_addr) 
+
+bool find_process_patch_page(vmi_instance_t vmi, string dwarf_fp, vmi_pid_t required_pid)
+{
+    unsigned long tasks_offset = vmi_get_offset(vmi, "linux_tasks");
+    unsigned long name_offset = vmi_get_offset(vmi, "linux_name");
+    unsigned long pid_offset = vmi_get_offset(vmi, "linux_pid");
+
+    addr_t list_head = vmi_translate_ksym2v(vmi, "init_task") + tasks_offset;
+
+    addr_t next_list_entry = list_head;
+
+    // Perform task list walk-through
+    addr_t current_process = 0;
+    char *procname = NULL;
+    vmi_pid_t pid = 0;
+    status_t status;
+
+    do 
+    {
+        current_process = next_list_entry - tasks_offset;
+
+        vmi_read_32_va(vmi, current_process + pid_offset, 0, (uint32_t*)&pid);
+
+        if (required_pid != pid){
+            status = vmi_read_addr_va(vmi, next_list_entry, 0, &next_list_entry);
+            if (status == VMI_FAILURE)
+            {
+                printf("Failed to read next pointer in loop at %" PRIx64"\n", next_list_entry);
+                return false;
+            }
+
+            continue;
+        }
+
+        printf("\nPID\tProcess Name\n");
+        procname = vmi_read_str_va(vmi, current_process + name_offset, 0);
+        if (!procname) 
+        {
+            printf("Failed to find procname\n");
+            return false;
+        }
+
+        // Print details
+        printf("%d\t%s (struct addr: \%" PRIx64")\n", pid, procname, current_process);
+        if (procname) 
+        {
+            free(procname);
+            procname = NULL;
+        }
+
+        addr_t struct_addr = vmi_translate_kv2p(vmi, current_process);
+
+        // Print details of process in physical memory
+        char *phy_procname = NULL;
+        vmi_pid_t phy_pid = 0;
+
+        vmi_read_32_pa(vmi, struct_addr + pid_offset, (uint32_t*)&phy_pid);
+        phy_procname = vmi_read_str_pa(vmi, struct_addr + name_offset);
+        printf("Physical:%d\t%s (struct addr: \%" PRIx64")\n", phy_pid, phy_procname, struct_addr);
+        if (phy_procname)
+        {
+            free(phy_procname);
+            phy_procname = NULL;
+        }
+
+        page_info_t page_info;
+        status = vmi_pagetable_lookup_extended(vmi, vmi_pid_to_dtb(vmi, pid), current_process, &page_info);
+        if (status == VMI_FAILURE)
+        {
+            printf("Failed to retrieve page info at %" PRIx64"\n", current_process);
+            return false;
+        }
+        printf("Page Size: %d\n", page_info.size);
+        
+
+        //Retrieve process maps
+        int mm_offset = retrieve_offset(dwarf_fp, "task_struct", "mm");
+        if (mm_offset != -1){
+            
+            addr_t current_mm;
+            vmi_read_addr_va(vmi, current_process + mm_offset, 0, (addr_t*)&current_mm);
+
+            printf("MM: %" PRIx64"\n", current_mm);    
+
+            int mmap_offset = retrieve_offset(dwarf_fp, "mm_struct", "mmap");
+            if (mmap_offset != -1){
+
+                uint64_t mmap_start;
+                uint64_t mmap_end;
+                addr_t current_mmap;
+                vmi_read_addr_va(vmi, current_mm + mmap_offset, 0, (addr_t*)&current_mmap);
+
+                int map_start_offset = retrieve_offset(dwarf_fp, "vm_area_struct", "vm_start");
+                int map_end_offset = retrieve_offset(dwarf_fp, "vm_area_struct", "vm_end");
+                int map_next_offset = retrieve_offset(dwarf_fp, "vm_area_struct", "vm_next");
+
+                while (current_mmap != NULL) {
+                    printf("MMAP: %" PRIx64"\n", current_mmap);
+
+                    vmi_read_64_va(vmi, current_mmap + map_start_offset, 0, (uint64_t*)&mmap_start);
+                    vmi_read_64_va(vmi, current_mmap + map_end_offset, 0, (uint64_t*)&mmap_end);
+
+                    printf("MMAP START: %" PRIx64"\n", mmap_start);    
+                    printf("MMAP END: %" PRIx64"\n", mmap_end);    
+
+                    vmi_read_addr_va(vmi, current_mmap + map_next_offset, 0, (addr_t*)&current_mmap);
+                }
+            }
+        }
+
+        status = vmi_read_addr_va(vmi, next_list_entry, 0, &next_list_entry);
+        if (status == VMI_FAILURE)
+        {
+            printf("Failed to read next pointer in loop at %" PRIx64"\n", next_list_entry);
+            return false;
+        }
+
+    } while(next_list_entry != list_head);
+
+    return true;
+}
+
+
+void register_patched_memory_page(vmi_instance_t vmi, string dwarf_fp, vmi_pid_t pid, addr_t page_addr) 
 {           
+    if (page_addr == 0)
+    {
+        // Try to retrieve page
+        find_process_patch_page(vmi, dwarf_fp, pid);
+        return;
+    }
+
     printf("Registering event for pid: %d and addr: %" PRIx64"\n", pid, page_addr);
     addr_t struct_addr = vmi_translate_uv2p(vmi, page_addr, pid);
     printf("Registering event for physical addr: %" PRIx64"\n", struct_addr);
@@ -377,21 +513,24 @@ void *security_checking_thread(void *arg)
         {
             case PUTS_EVENT:{
                 printf("Encountered PUTS_EVENT\n");
-                /*#ifdef RE_REGISTER_EVENTS
-                    // Recheck processes
-                    register_processes_events(vmi, dwarf_fp);
-                #endif
-
-                #ifdef ANALYSIS_MODE
-                    // Volatility Plugin linux_check_fop
-                    res = system("python scripts/check_fop.py");
-                    // Volatility Plugin linux_check_creds
-                    res = system("python scripts/check_creds.py");
-                #endif*/
                 break;
             } 
-            case EXIT_EVENT:{
-                printf("Encountered EXIT_EVENT\n");
+            case OPEN_EVENT:{
+                printf("Encountered OPEN_EVENT\n");
+                break;
+            }
+            case CLOSE_EVENT:{
+                printf("Encountered CLOSE_EVENT\n");
+                break;
+            }
+            case FORK_EVENT:{
+                printf("Encountered FORK_EVENT\n");
+                break;
+            }
+            case INTERRUPTED_EVENT:
+            {
+                printf("Encountered INTERRUPTED_EVENT\n");
+                printf("Security Checking Thread Ended!\n"); 
                 /*#ifdef RE_REGISTER_EVENTS
                     // Recheck open files
                     register_open_files_events(vmi, dwarf_fp);
@@ -401,12 +540,6 @@ void *security_checking_thread(void *arg)
                     // Volatility Plugin linux_check_afinfo
                     res = system("python scripts/check_afinfo.py");
                 #endif*/
-                break;
-            }
-            case INTERRUPTED_EVENT:
-            {
-                printf("Encountered INTERRUPTED_EVENT\n");
-                printf("Security Checking Thread Ended!\n"); 
                 return NULL;
             }
             default:
