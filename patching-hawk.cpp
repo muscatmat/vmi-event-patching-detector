@@ -81,24 +81,25 @@ static void close_handler(int sig)
     event_deque.push_front(INTERRUPTED_EVENT);
 }
 
-static int retrieve_struct_size(string file_path, string struct_name){
-    int result = -1;
-    ifstream in_file(file_path);
+// Commented since function is unused but might be required in the future
+// static int retrieve_struct_size(string file_path, string struct_name){
+//     int result = -1;
+//     ifstream in_file(file_path);
 
-    string struct_substr("<DW_TAG_structure_type> DW_AT_name<\"" + struct_name + "\">");
-    string struct_size_substr("DW_AT_byte_size<");
-    string line;
-    while (getline(in_file, line))
-    {
-        if (line.find(struct_substr) != string::npos){
-            string temp_mem_loc(line.substr(line.find(struct_size_substr) + struct_size_substr.size()));
-            result = stoi(temp_mem_loc.substr(0, temp_mem_loc.find(">")), NULL, 16);
-            break;
-        }
-    }
+//     string struct_substr("<DW_TAG_structure_type> DW_AT_name<\"" + struct_name + "\">");
+//     string struct_size_substr("DW_AT_byte_size<");
+//     string line;
+//     while (getline(in_file, line))
+//     {
+//         if (line.find(struct_substr) != string::npos){
+//             string temp_mem_loc(line.substr(line.find(struct_size_substr) + struct_size_substr.size()));
+//             result = stoi(temp_mem_loc.substr(0, temp_mem_loc.find(">")), NULL, 16);
+//             break;
+//         }
+//     }
 
-    return result;
-}
+//     return result;
+// }
 
 static int retrieve_offset(string file_path, string struct_name, string member_name){
     int result = -1;
@@ -140,9 +141,9 @@ int main(int argc, char **argv)
     clock_t program_time = clock();
     printf("Patching Event Hawk Program Initiated!\n");
 
-    if(argc != 5)
+    if(argc != 3)
     {
-        fprintf(stderr, "Usage: patching-hawk <VM Name> <VM module.dwarf> <patch process pid> <patched page addr>\n");
+        fprintf(stderr, "Usage: patching-hawk <VM Name> <VM module.dwarf>\n");
         printf("Patching Event Hawk-Eye Program Ended!\n");
         return 1; 
     }
@@ -192,13 +193,7 @@ int main(int argc, char **argv)
         }
     }
 
-    vmi_pid_t pid;
-    sscanf(argv[3], "%d", &pid);
-
-    addr_t page_addr;
-    sscanf(argv[4], "%" PRIx64"", &page_addr);
-
-    register_patched_memory_page(vmi, dwarf_fp, pid, page_addr);
+    register_patched_processes(vmi, dwarf_fp);
 
     printf("Waiting for events...\n");
     while (!interrupted)
@@ -293,14 +288,19 @@ void free_event_data(vmi_event_t *event, status_t rc)
     free(data); 
 }
 
-
-addr_t find_process_patch_page(vmi_instance_t vmi, string dwarf_fp, vmi_pid_t required_pid)
+bool register_patched_processes(vmi_instance_t vmi, string dwarf_fp)
 {
-    addr_t process_patch_page = NULL;
-
     unsigned long tasks_offset = vmi_get_offset(vmi, "linux_tasks");
-    unsigned long name_offset = vmi_get_offset(vmi, "linux_name");
+    // unsigned long name_offset = vmi_get_offset(vmi, "linux_name");
     unsigned long pid_offset = vmi_get_offset(vmi, "linux_pid");
+
+    unsigned long mm_offset = retrieve_offset(dwarf_fp, "task_struct", "mm");
+
+    unsigned long mmap_offset = retrieve_offset(dwarf_fp, "mm_struct", "mmap");
+
+    unsigned long map_start_offset = retrieve_offset(dwarf_fp, "vm_area_struct", "vm_start");
+    unsigned long map_end_offset = retrieve_offset(dwarf_fp, "vm_area_struct", "vm_end");
+    unsigned long map_next_offset = retrieve_offset(dwarf_fp, "vm_area_struct", "vm_next");
 
     addr_t list_head = vmi_translate_ksym2v(vmi, "init_task") + tasks_offset;
 
@@ -317,18 +317,7 @@ addr_t find_process_patch_page(vmi_instance_t vmi, string dwarf_fp, vmi_pid_t re
 
         vmi_read_32_va(vmi, current_process + pid_offset, 0, (uint32_t*)&pid);
 
-        if (required_pid != pid){
-            status = vmi_read_addr_va(vmi, next_list_entry, 0, &next_list_entry);
-            if (status == VMI_FAILURE)
-            {
-                printf("Failed to read next pointer in loop at %" PRIx64"\n", next_list_entry);
-                return false;
-            }
-
-            continue;
-        }
-
-        // DO NOT USE THIS CODE AS IT BREAKS LIBVMI
+        // MM - IMP: DO NOT USE vmi_pagetable_lookup_extended AS IT BREAKS LIBVMI
         // page_info_t page_info;
         // status = vmi_pagetable_lookup_extended(vmi, vmi_pid_to_dtb(vmi, pid), current_process, &page_info);
         // if (status == VMI_FAILURE)
@@ -338,36 +327,27 @@ addr_t find_process_patch_page(vmi_instance_t vmi, string dwarf_fp, vmi_pid_t re
         // }
         // printf("Page Size: %d\n", page_info.size);
         
-        //Retrieve process maps
-        int mm_offset = retrieve_offset(dwarf_fp, "task_struct", "mm");
-        
+        // Retrieve process maps
         addr_t current_mm;
-        vmi_read_addr_va(vmi, current_process + mm_offset, 0, (addr_t*)&current_mm);
+        addr_t current_mmap;
 
-        printf("MM: %" PRIx64"\n", current_mm);    
-
-        int mmap_offset = retrieve_offset(dwarf_fp, "mm_struct", "mmap");
-        
         uint64_t mmap_start;
         uint64_t mmap_end;
-        addr_t current_mmap;
-        vmi_read_addr_va(vmi, current_mm + mmap_offset, 0, (addr_t*)&current_mmap);
 
-        int map_start_offset = retrieve_offset(dwarf_fp, "vm_area_struct", "vm_start");
-        int map_end_offset = retrieve_offset(dwarf_fp, "vm_area_struct", "vm_end");
-        int map_next_offset = retrieve_offset(dwarf_fp, "vm_area_struct", "vm_next");
+        vmi_read_addr_va(vmi, current_process + mm_offset, 0, (addr_t*)&current_mm);
+        vmi_read_addr_va(vmi, current_mm + mmap_offset, 0, (addr_t*)&current_mmap);
 
         addr_t mypage_buffer = 0;
 
         struct mmap_data *mmap_head = NULL;
         struct mmap_data *cursor = NULL;
 
-        while (current_mmap != NULL) 
+        while (current_mmap != 0) 
         {
             vmi_read_64_va(vmi, current_mmap + map_start_offset, 0, (uint64_t*)&mmap_start);
             vmi_read_64_va(vmi, current_mmap + map_end_offset, 0, (uint64_t*)&mmap_end);
 
-            vmi_read_addr_va(vmi, mmap_start + BUFFER_GLOBAL_VAR_OFFSET, required_pid, (addr_t*)&mypage_buffer);
+            vmi_read_addr_va(vmi, mmap_start + BUFFER_GLOBAL_VAR_OFFSET, pid, (addr_t*)&mypage_buffer);
 
             struct mmap_data *mmap_node = (struct mmap_data *) malloc(sizeof(struct mmap_data));
             mmap_node->map_start = mmap_start;
@@ -396,13 +376,15 @@ addr_t find_process_patch_page(vmi_instance_t vmi, string dwarf_fp, vmi_pid_t re
             {
                 if (search_mmap_for_buffer(mmap_head, cursor->buffer_addr) != NULL)
                 {
-                    process_patch_page = cursor->buffer_addr;
+                    // Register patch process page
+                    register_patched_memory_page(vmi, pid, cursor->buffer_addr);
                     break;
                 }
             }
             cursor = cursor->next;
         }
 
+        // Free mmap data list
         while (mmap_head != NULL) 
         {
             cursor = mmap_head;
@@ -410,30 +392,31 @@ addr_t find_process_patch_page(vmi_instance_t vmi, string dwarf_fp, vmi_pid_t re
 
             free(cursor);
         }
-
-        return process_patch_page; // Once found process patch page then return
+       
+        status = vmi_read_addr_va(vmi, next_list_entry, 0, &next_list_entry);
+        if (status == VMI_FAILURE)
+        {
+            printf("Failed to read next pointer in loop at %" PRIx64"\n", next_list_entry);
+            return false;
+        }
     } while(next_list_entry != list_head);
 
-    return process_patch_page;
+    return true;
 }
 
-void register_patched_memory_page(vmi_instance_t vmi, string dwarf_fp, vmi_pid_t pid, addr_t page_addr) 
+void register_patched_memory_page(vmi_instance_t vmi, vmi_pid_t pid, addr_t page_addr) 
 {           
-    if (page_addr == 0)
-    {
-        // Try to retrieve page
-        page_addr = find_process_patch_page(vmi, dwarf_fp, pid);
-
-        if (page_addr == NULL)
-            exit(0);
+    if (page_addr == 0){
+        printf("Pid: %d has page_addr set as 0\n", pid);
+        return;
     }
 
     printf("Registering event for pid: %d and addr: %" PRIx64"\n", pid, page_addr);
     addr_t struct_addr = vmi_translate_uv2p(vmi, page_addr, pid);
     
-    if (struct_addr == NULL){
+    if (struct_addr == 0){
         printf("Physical address could not be retrieved: %" PRIx64"\n", struct_addr);
-        exit(0);
+        return;
     }
 
     printf("Registering event for physical addr: %" PRIx64"\n", struct_addr);
@@ -453,9 +436,8 @@ void register_patched_memory_page(vmi_instance_t vmi, string dwarf_fp, vmi_pid_t
 
         cleanup(vmi);
         printf("Patching Event Hawk-Eye Program Ended!\n");
-        exit(0);
+        return;
     }
-    printf("Patching Event Successfuly Registered!\n");
 }
 
 void cleanup(vmi_instance_t vmi)
