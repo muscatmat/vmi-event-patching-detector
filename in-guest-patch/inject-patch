@@ -1,0 +1,127 @@
+#!/bin/bash
+
+echo "Starting process gdb injection" >&2
+curpid=$(echo "$$")
+
+#Attach to each process and inject patch
+declare -a pidlist
+mapfile -t pidlist < <(ps -axo pid,euid,comm | awk '($2>=1000)&&($1!="PID")&&($3!="x-session-manag")&&($3!="dbus-daemon")&&($3!="gnome-terminal-")&&($3!="bash") {print $1}')
+
+for patchpid in "${pidlist[@]}"
+do
+	echo "Trying to patch to $patchpid";
+	if ([ "$patchpid" == "$curpid" ]) then
+		echo "Skipping current pid";
+		continue; 
+	fi
+
+	coproc mygdb { gdb; } 2>&1
+
+	echo "set confirm off" >&${mygdb[1]}
+	while IFS= read -t 0.5 -ru ${mygdb[0]} useless; do continue; done
+
+	echo "attaching to pid $patchpid and comm `ps -p $patchpid -o comm | awk '($1!="COMMAND") {print $1}'`"            
+	echo "attach $patchpid" >&${mygdb[1]}
+	#Check whether attach process succeeded
+	didfail=false
+	while IFS= read -t 0.5 -ru ${mygdb[0]} line
+	do
+		if ((echo "$line" | grep -Fq "No such process") || (echo "$line" | grep -Fq "Argument required") && (echo "$line" | grep -Fq "zombie")) then
+			echo "Process attach failed";
+			didfail=true
+		fi
+	done
+
+	if ([ "$didfail" == true ]) then
+                echo "detach" >&${mygdb[1]}
+
+                #Kill gdb process
+                echo "q" >&${mygdb[1]}
+                kill $mygdb_PID || true
+		continue;
+	fi
+
+	#Check if patch already included
+	echo "info sharedLibrary" >&${mygdb[1]}
+	while IFS= read -t 0.5 -ru ${mygdb[0]} line
+        do 
+                if (echo "$line" | grep -Fq "patch.so") then
+                        echo "Process already patched";
+			didfail=true
+	        fi
+        done
+	
+	if ([ "$didfail" == true ]) then
+                #Detach from current process
+                echo "detach" >&${mygdb[1]}
+
+                #Kill gdb process
+                echo "q" >&${mygdb[1]}
+                kill $mygdb_PID || true
+                continue;
+        fi
+	
+	#Inject patch lib
+	echo "set \$dlopen = (void*(*)(char*, int)) __libc_dlopen_mode" >&${mygdb[1]}
+	#echo "set \$dlclose = (int(*)(void*)) __libc_dlclose" >&${mygdb[1]}
+	echo "set \$library = \$dlopen(\"/home/muscatmat/Programming/process_patching/patch.so\", 1)" >&${mygdb[1]}
+	while IFS= read -t 0.5 -ru ${mygdb[0]} useless; do continue; done
+	echo "print \$library" >&${mygdb[1]}
+	while IFS= read -t 0.5 -ru ${mygdb[0]} line; do printf '%s\n' "$line"; done
+
+	#Hook functions
+	hookfuncnames=( puts open close fopen fclose fork )
+	for funcname in "${hookfuncnames[@]}"
+	do
+		while IFS= read -t 0.5 -ru ${mygdb[0]} useless; do continue; done
+		echo "set \$hookfuncloc = &'$funcname@plt'" >&${mygdb[1]}
+		echo "disassemble \$hookfuncloc" >&${mygdb[1]}
+		#Check if we plt entry is present or not
+		IFS= read -t 0.5 -ru ${mygdb[0]} pltentryline;
+		#echo "PLTENTRYLINE: $pltentryline";
+		if !(echo $pltentryline | grep -Fq "No symbol")
+		then 
+			# If plt entry is present
+			IFS= read -t 0.5 -ru ${mygdb[0]} gotentryline;
+
+			if (echo $gotentryline | grep -Fq "Cannot access memory")
+			then
+				echo "Cannot access memory for got entry"
+				continue;
+			fi
+
+			gotentry=$(echo $gotentryline | awk '{print $6;}');
+			#echo "GOTENTRYLINE: $gotentryline";
+				
+			while IFS= read -t 0.5 -ru ${mygdb[0]} useless; do continue; done
+
+			#Retrieve patch function
+			echo "x/g patch_$funcname" >&${mygdb[1]}
+			IFS= read -t 0.5 -ru ${mygdb[0]} hookaddrline; 
+			hookaddr=$(echo "$hookaddrline" | awk '{print $1;}');
+			#echo "HOOKADDRLINE: $hookaddrline";
+				
+			if (echo $hookaddrline | grep -Fq "No symbol")
+                        then 
+                                echo "Patch function could not be found"
+                                continue;
+                        fi
+
+			echo "set *(int64_t *) $gotentry = $hookaddr" >&${mygdb[1]};
+			#echo "set *(int64_t *) $gotentry = $hookaddr";
+			echo "PLT entry for function $funcname successfully patched";
+		else
+			# If plt entry not found
+			echo "PLT entry for function $funcname not found";
+		fi
+	done
+
+	#Detach from current process
+	echo "detach" >&${mygdb[1]}
+
+	#Kill gdb process
+	echo "q" >&${mygdb[1]}
+	kill $mygdb_PID || true
+done
+
+echo "Finished process gdb injection" >&2

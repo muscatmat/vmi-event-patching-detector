@@ -1,0 +1,57 @@
+Checking ptrace protection 
+
+	https://wiki.ubuntu.com/SecurityTeam/Roadmap/KernelHardening#ptrace_Protection
+
+Compiling a library
+
+	sudo gcc -shared -fPIC patch.c -o patch.so -ldl -static-libstdc++
+
+Attach to process
+
+	sudo gdb -ex "attach $(pidof test)"
+
+Load a library
+
+	set $dlopen = (void*(*)(char*, int)) dlopen
+	set $library = $dlopen("/home/muscatmat/Programming/process_patching/patch.so", 1)
+	continue
+
+Unload a library
+
+	set $dlclose = (int(*)(void*)) dlclose
+	call dlclose($library)
+	continue
+
+Reload a library
+	
+	set $dlopen = (void*(*)(char*, int)) dlopen
+	call dlclose($library)
+	set $library = $dlopen("/home/muscatmat/Programming/process_patching/patch.so", 1)
+	continue
+
+Autoload library symbols
+	show auto-solib-add
+	sharedLibrary
+
+Set hooked functions plt (due to 64 bit)
+	set *(int64_t *)0x601028 = <EXIT GOT ADDR> // 0x601030 is exit GOT, cast address to (int64_t *) to set to a 64 bit addresses
+	set *(int64_t *)0x601018 = <PUTS GOT ADDR>
+
+
+Loading/Unloading a library through libc
+
+	set $dlopen = (void*(*)(char*, int)) __libc_dlopen_mode
+	set $dlclose = (int(*)(void*)) __libc_dlclose
+
+	set $library = $dlopen("/home/muscatmat/Programming/process_patching/patch.so", 1)
+	call $dlclose($library)
+	continue
+
+IMP:
+	Requires redirection of GOT to shared library appropriate function
+	Check missing debug info for shared library
+
+TODO:
+	Convert posix mem align to mmap	
+	FIND POSIX FUNCTIONS
+
