@@ -39,7 +39,8 @@ using namespace std;
 
 #define PAUSE_VM 0
 
-#define BUFFER_GLOBAL_VAR_OFFSET 0x201800
+//#define BUFFER_GLOBAL_VAR_OFFSET 0x201800
+#define BUFFER_GLOBAL_VAR_OFFSET 0x201860
 
 // Event Names Contants
 #define INTERRUPTED_EVENT 64
@@ -165,6 +166,7 @@ int main(int argc, char **argv)
     sigaction(SIGALRM, &act, NULL);
 
     char *vm_name = argv[1];
+
     
     // Initialize the libvmi library.
     if (VMI_FAILURE ==
@@ -291,12 +293,14 @@ void free_event_data(vmi_event_t *event, status_t rc)
 bool register_patched_processes(vmi_instance_t vmi, string dwarf_fp)
 {
     unsigned long tasks_offset = vmi_get_offset(vmi, "linux_tasks");
-    // unsigned long name_offset = vmi_get_offset(vmi, "linux_name");
+    unsigned long name_offset = vmi_get_offset(vmi, "linux_name");
     unsigned long pid_offset = vmi_get_offset(vmi, "linux_pid");
 
     unsigned long mm_offset = retrieve_offset(dwarf_fp, "task_struct", "mm");
 
     unsigned long mmap_offset = retrieve_offset(dwarf_fp, "mm_struct", "mmap");
+
+    unsigned long pgd_offset = retrieve_offset(dwarf_fp, "mm_struct", "pgd");
 
     unsigned long map_start_offset = retrieve_offset(dwarf_fp, "vm_area_struct", "vm_start");
     unsigned long map_end_offset = retrieve_offset(dwarf_fp, "vm_area_struct", "vm_end");
@@ -317,16 +321,6 @@ bool register_patched_processes(vmi_instance_t vmi, string dwarf_fp)
 
         vmi_read_32_va(vmi, current_process + pid_offset, 0, (uint32_t*)&pid);
 
-        // MM - IMP: DO NOT USE vmi_pagetable_lookup_extended AS IT BREAKS LIBVMI
-        // page_info_t page_info;
-        // status = vmi_pagetable_lookup_extended(vmi, vmi_pid_to_dtb(vmi, pid), current_process, &page_info);
-        // if (status == VMI_FAILURE)
-        // {
-        //     printf("Failed to retrieve page info at %" PRIx64"\n", current_process);
-        //     return false;
-        // }
-        // printf("Page Size: %d\n", page_info.size);
-        
         // Retrieve process maps
         addr_t current_mm;
         addr_t current_mmap;
@@ -336,6 +330,9 @@ bool register_patched_processes(vmi_instance_t vmi, string dwarf_fp)
 
         vmi_read_addr_va(vmi, current_process + mm_offset, 0, (addr_t*)&current_mm);
         vmi_read_addr_va(vmi, current_mm + mmap_offset, 0, (addr_t*)&current_mmap);
+
+        addr_t current_pgd;
+        vmi_read_addr_va(vmi, current_mm + pgd_offset, 0, (addr_t*)&current_pgd);
 
         addr_t mypage_buffer = 0;
 
@@ -351,6 +348,7 @@ bool register_patched_processes(vmi_instance_t vmi, string dwarf_fp)
 
             struct mmap_data *mmap_node = (struct mmap_data *) malloc(sizeof(struct mmap_data));
             mmap_node->map_start = mmap_start;
+            mmap_node->map_size = (int)(mmap_end - mmap_start);
             mmap_node->buffer_addr = mypage_buffer;
             mmap_node->next = NULL;
 
@@ -376,6 +374,16 @@ bool register_patched_processes(vmi_instance_t vmi, string dwarf_fp)
             {
                 if (search_mmap_for_buffer(mmap_head, cursor->buffer_addr) != NULL)
                 {
+                    char *procname = vmi_read_str_va(vmi, current_process + name_offset, 0);
+
+                    printf("pid: %d pgd: %" PRIx64" name: %s\n", pid, current_pgd, procname);
+
+                    if (procname) 
+                    {
+                        free(procname);
+                        procname = NULL;
+                    }
+
                     // Register patch process page
                     register_patched_memory_page(vmi, pid, cursor->buffer_addr);
                     break;
@@ -412,8 +420,15 @@ void register_patched_memory_page(vmi_instance_t vmi, vmi_pid_t pid, addr_t page
     }
 
     printf("Registering event for pid: %d and addr: %" PRIx64"\n", pid, page_addr);
+    vmi_pause_vm(vmi);
+
     addr_t struct_addr = vmi_translate_uv2p(vmi, page_addr, pid);
-    
+    addr_t dtb = vmi_pid_to_dtb(vmi, pid);
+
+    printf("dtb: %" PRIx64" pid %d\n", dtb, vmi_dtb_to_pid(vmi, dtb));
+
+    vmi_resume_vm(vmi);
+
     if (struct_addr == 0){
         printf("Physical address could not be retrieved: %" PRIx64"\n", struct_addr);
         return;
