@@ -39,16 +39,18 @@ using namespace std;
 
 #define PAUSE_VM 0
 
-//#define BUFFER_GLOBAL_VAR_OFFSET 0x201800
-#define BUFFER_GLOBAL_VAR_OFFSET 0x201860
+#define BUFFER_GLOBAL_VAR_OFFSET 0x201a00
 
 // Event Names Contants
 #define INTERRUPTED_EVENT 64
-#define PUTS_EVENT 2
+#define READ_EVENT 1
+#define WRITE_EVENT 2
 #define OPEN_EVENT 3
 #define CLOSE_EVENT 4
 #define FORK_EVENT 5
 #define EXEC_EVENT 6
+#define SOCKET_EVENT 7
+#define SHUTDOWN_EVENT 8
 
 /////////////////////
 // Global Variables
@@ -519,10 +521,14 @@ void *security_checking_thread(void *arg)
 
         switch (event_type)
         {
-            case PUTS_EVENT:{
-                printf("Encountered PUTS_EVENT\n");
+            case READ_EVENT:{
+                printf("Encountered WRITEREAD_EVENT_EVENT\n");
                 break;
-            } 
+            }
+            case WRITE_EVENT:{
+                printf("Encountered WRITE_EVENT\n");
+                break;
+            }
             case OPEN_EVENT:{
                 printf("Encountered OPEN_EVENT\n");
                 break;
@@ -533,6 +539,14 @@ void *security_checking_thread(void *arg)
             }
             case FORK_EVENT:{
                 printf("Encountered FORK_EVENT\n");
+                break;
+            }
+            case SOCKET_EVENT:{
+                printf("Encountered SOCKET_EVENT\n");
+                break;
+            }
+            case SHUTDOWN_EVENT:{
+                printf("Encountered SHUTDOWN_EVENT\n");
                 break;
             }
             case INTERRUPTED_EVENT:

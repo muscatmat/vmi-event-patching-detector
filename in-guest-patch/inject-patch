@@ -70,7 +70,7 @@ do
 	while IFS= read -t 0.5 -ru ${mygdb[0]} line; do printf '%s\n' "$line"; done
 
 	#Hook functions
-	hookfuncnames=( puts open close fopen fclose fork )
+	hookfuncnames=( open close fopen fclose fork socket shutdown)
 	for funcname in "${hookfuncnames[@]}"
 	do
 		while IFS= read -t 0.5 -ru ${mygdb[0]} useless; do continue; done

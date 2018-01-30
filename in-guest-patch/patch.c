@@ -9,21 +9,23 @@
 #include <stdarg.h>
 
 // Shared Event Numbers with VMI monitor
-#define PUTS_EVENT 2
+#define READ_EVENT 1
+#define WRITE_EVENT 2
 #define OPEN_EVENT 3
 #define CLOSE_EVENT 4
 #define FORK_EVENT 5
 #define EXEC_EVENT 6
+#define SOCKET_EVENT 7
+#define SHUTDOWN_EVENT 8
 
 // Hooked Functions Definitions
-typedef int (*libc_puts)(const char *);
-
 typedef int (*libc_open)(const char *, int, ...);
 typedef int (*libc_close)(int);
 typedef FILE * (*libc_fopen)( const char *, const char *);
 typedef int (*libc_fclose)(FILE *);
-
 typedef pid_t (*libc_fork)(void);
+typedef int (*libc_socket)(int, int, int);
+typedef int (*libc_shutdown)(int, int);
 
 static void* libc_handle;
 void* mypage_buffer = (void *)1;
@@ -50,7 +52,7 @@ void __attribute__((constructor)) patch_startup()
 	printf("Page Signature: %s\n", signature_buffer);
 }
 
-void __attribute__((destructor)) patch_shutdown()
+void __attribute__((destructor)) patch_cleanup()
 {
 	printf("Patch Library shutdown\n");
 
@@ -172,24 +174,45 @@ pid_t patch_fork()
         return func();
 }
 
-int patch_puts(const char * str)
+int patch_socket(int namespace, int style, int protocol)
 {
-	// Write to memory page
-	*((int*)mypage_buffer)= PUTS_EVENT;
+        // Write to memory page
+        *((int*)mypage_buffer)= SOCKET_EVENT;
 
-	printf("puts - Function called! Page Value : %d\n", *((int*)mypage_buffer));
-	if(!libc_handle) {
-   		printf("puts - dlopen() failed.\n");
-		libc_puts func = (libc_puts)dlsym(RTLD_NEXT,"puts");
-		return func(str);
-	}
+	printf("socket - Function called! Page Value : %d\n", *((int*)mypage_buffer));
+        if(!libc_handle) {
+                printf("socket - dlopen() failed.\n");
+                libc_socket func = (libc_socket)dlsym(RTLD_NEXT,"socket");
+                return func(namespace, style, protocol);
+        }
 
-	libc_puts func = (libc_puts)dlsym(libc_handle,"puts");
-	if (!func){
-		printf("puts - dlsym() failed.\n");
-		return -1;
-	}
+        libc_socket func = (libc_socket)dlsym(libc_handle,"socket");
+        if (!func){
+                printf("socket - dlsym() failed.\n");
+                return -1;
+        }
 
-	return func(str);
+        return func(namespace, style, protocol);
+}
+
+int patch_shutdown(int socket, int how)
+{
+        // Write to memory page
+        *((int*)mypage_buffer)= SHUTDOWN_EVENT;
+
+        printf("shutdown - Function called! Page Value : %d\n", *((int*)mypage_buffer));
+        if(!libc_handle) {
+                printf("shutdown - dlopen() failed.\n");
+                libc_shutdown func = (libc_shutdown)dlsym(RTLD_NEXT,"shutdown");
+                return func(socket, how);
+        }
+
+        libc_shutdown func = (libc_shutdown)dlsym(libc_handle,"shutdown");
+        if (!func){
+                printf("shutdown - dlsym() failed.\n");
+                return -1;
+        }
+
+        return func(socket, how);
 }
 
