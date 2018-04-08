@@ -61,7 +61,7 @@ string dwarf_fp;
 bool didFirstChange = false;
 
 // Result Measurements
-//#define MONITORING_MODE
+#define MONITORING_MODE
 
 //#define ANALYSIS_MODE
 //#define RE_REGISTER_EVENTS
@@ -236,8 +236,16 @@ event_response_t mem_write_cb(vmi_instance_t vmi, vmi_event_t *event)
     uint32_t event_page_data;
     vmi_read_32_pa(vmi, event_addr, &event_page_data);
 
-    if (event->mem_event.offset != 0 || (event_page_data != 0 && didFirstChange)){
+    /*if (event->mem_event.offset != 0 || (event_page_data != 0 && didFirstChange)){
         printf("Offset \%" PRIx64" is invalid or data %d is not zero!\n",event->mem_event.offset, event_page_data);
+        // MM - TODO: Check for process existince and return
+        return VMI_EVENT_RESPONSE_NONE;
+    }
+
+    didFirstChange = true;*/
+
+    if (event->mem_event.offset != 0 || ((event_page_data < 1 || event_page_data > 8) && didFirstChange)){
+        printf("Offset \%" PRIx64" is invalid or data %d is invalid!\n",event->mem_event.offset, event_page_data);
         // MM - TODO: Check for process existince and return
         return VMI_EVENT_RESPONSE_NONE;
     }
@@ -264,13 +272,12 @@ event_response_t page_change_callback(vmi_instance_t vmi, vmi_event_t *event)
     printf("Event Type is %d\n", event_type);
 
     #ifdef MONITORING_MODE
-        // MM - TODO: Check event_type is within accepted range and whether to register event SIGNATURE??
         event_deque.push_back(event_type);
     #endif
 
     // MM - Rewrite zero again for page data validation
-    uint32_t zero_data = 0;
-    vmi_write_32_pa(vmi, event_addr, &zero_data);
+    //uint32_t zero_data = 0;
+    //vmi_write_32_pa(vmi, event_addr, &zero_data);
 
     if (vmi_register_event(vmi, event) == VMI_FAILURE)
     {
@@ -294,6 +301,8 @@ void free_event_data(vmi_event_t *event, status_t rc)
 
 bool register_patched_processes(vmi_instance_t vmi, string dwarf_fp)
 {
+    printf("Registering patched processes memory event pages\n");
+
     unsigned long tasks_offset = vmi_get_offset(vmi, "linux_tasks");
     unsigned long name_offset = vmi_get_offset(vmi, "linux_name");
     unsigned long pid_offset = vmi_get_offset(vmi, "linux_pid");
@@ -316,7 +325,6 @@ bool register_patched_processes(vmi_instance_t vmi, string dwarf_fp)
     addr_t current_process = 0;
     vmi_pid_t pid = 0;
     status_t status;
-
     do 
     {
         current_process = next_list_entry - tasks_offset;
@@ -422,14 +430,14 @@ void register_patched_memory_page(vmi_instance_t vmi, vmi_pid_t pid, addr_t page
     }
 
     printf("Registering event for pid: %d and addr: %" PRIx64"\n", pid, page_addr);
-    vmi_pause_vm(vmi);
+    // vmi_pause_vm(vmi);
 
     addr_t struct_addr = vmi_translate_uv2p(vmi, page_addr, pid);
-    addr_t dtb = vmi_pid_to_dtb(vmi, pid);
+    //addr_t dtb = vmi_pid_to_dtb(vmi, pid);
+    //printf("dtb: %" PRIx64" pid %d\n", dtb, vmi_dtb_to_pid(vmi, dtb));
+    //printf("pid: %d pgd: %" PRIx64" name: %s\n", pid, current_pgd, procname);
 
-    printf("dtb: %" PRIx64" pid %d\n", dtb, vmi_dtb_to_pid(vmi, dtb));
-
-    vmi_resume_vm(vmi);
+    // vmi_resume_vm(vmi);
 
     if (struct_addr == 0){
         printf("Physical address could not be retrieved: %" PRIx64"\n", struct_addr);
@@ -448,13 +456,7 @@ void register_patched_memory_page(vmi_instance_t vmi, vmi_pid_t pid, addr_t page
     patch_event->data = event_data;
 
     if (vmi_register_event(vmi, patch_event) == VMI_FAILURE)
-    {
         printf("Failed to register event.\n");
-
-        cleanup(vmi);
-        printf("Patching Event Hawk-Eye Program Ended!\n");
-        return;
-    }
 }
 
 void cleanup(vmi_instance_t vmi)
@@ -522,7 +524,7 @@ void *security_checking_thread(void *arg)
         switch (event_type)
         {
             case READ_EVENT:{
-                printf("Encountered WRITEREAD_EVENT_EVENT\n");
+                printf("Encountered READ_EVENT\n");
                 break;
             }
             case WRITE_EVENT:{
@@ -531,6 +533,13 @@ void *security_checking_thread(void *arg)
             }
             case OPEN_EVENT:{
                 printf("Encountered OPEN_EVENT\n");
+                #ifdef RE_REGISTER_EVENTS
+                    // Recheck open files
+                    register_patched_processes(vmi, dwarf_fp);
+                #endif
+
+                res = system("python scripts/check_lsof.py");
+
                 break;
             }
             case CLOSE_EVENT:{
@@ -543,6 +552,11 @@ void *security_checking_thread(void *arg)
             }
             case SOCKET_EVENT:{
                 printf("Encountered SOCKET_EVENT\n");
+                #ifdef RE_REGISTER_EVENTS
+                    // Recheck open files
+                    register_patched_processes(vmi, dwarf_fp);
+                #endif
+                
                 break;
             }
             case SHUTDOWN_EVENT:{
@@ -553,12 +567,7 @@ void *security_checking_thread(void *arg)
             {
                 printf("Encountered INTERRUPTED_EVENT\n");
                 printf("Security Checking Thread Ended!\n"); 
-                /*#ifdef RE_REGISTER_EVENTS
-                    // Recheck open files
-                    register_open_files_events(vmi, dwarf_fp);
-                #endif
-
-                #ifdef ANALYSIS_MODE
+                /*#ifdef ANALYSIS_MODE
                     // Volatility Plugin linux_check_afinfo
                     res = system("python scripts/check_afinfo.py");
                 #endif*/
